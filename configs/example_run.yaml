@@ -1,0 +1,79 @@
+# omniem-train — example run.yaml (starting template).
+#
+# Copy this file, edit the paths/fields for your dataset, and run:
+#   omniem-train check --config configs/example_run.yaml      # dry-run preflight
+#   omniem-train train --config configs/example_run.yaml      # full run
+#
+# Paths inside run.yaml resolve relative to THIS file's directory (absolute paths
+# pass through). See docs/guide.md for the complete field-by-field reference.
+
+run:
+  output_dir: outputs/mito_seg_001
+  seed: 777
+  amp: true                  # mixed precision (effective only on cuda)
+  device: auto               # auto | cpu | cuda
+
+model:                       # OPAQUE block, passed verbatim to omniem.OmniEM.from_config
+  arch: omniemv1
+  encoder: emdinov1
+  img_z: 1                   # 1 for a 2D head, >1 for a 3D head
+  out_channels: 2            # classes for image2label; 1 for image2image
+  task_type: image2label     # image2label | image2image
+  resize4emdino: false
+  mean: 0.5333               # fixed training normalization, in [0, 1] image space
+  std: 0.2314                #   (applied by model.apply_input)
+
+train:
+  weights:
+    # Pick ONE form (mutually exclusive — `merged` cannot combine with `encoder`/`head`):
+    encoder: weights/backbone_emdino_v1.pt   # pretrained backbone + random head (canonical fresh-train)
+    # head:   weights/head_only.pt           # …optionally also load a head (split form)
+    # merged: weights/merged.pt              # …OR continue from one merged whole-model file
+  train_encoder: false       # false freezes the backbone (default), true also fine-tunes it
+
+data:
+  train_jsons: [manifests/train.json]
+  val_jsons:   [manifests/val.json]
+  infer_jsons: []
+  axes_order: zxy            # on-disk axis order; the reader permutes to canonical (Y,X,Z)
+  img_size_xy: 112           # square, a multiple of the model stride (omniemv1 is 112)
+  img_size_z: 1
+  cache_num: 24              # MONAI CacheDataset cache size
+  workers: 0                 # dataloader workers (0 = main process)
+
+optim:
+  optimizer: adamw           # adam | adamw | sgd
+  lr: 1.0e-4
+  weight_decay: 0.0
+  max_epochs: 100
+  batch_size: 1
+  lr_schedule: warmup_cosine # warmup_cosine | cosine_anneal | none
+  warmup_epochs: 5
+
+loss:                        # TASK-GATED (cross-task keys are rejected at parse time)
+  # image2label:
+  boundary_loss: false
+  label_weights_alpha: 0.0   # (1/freq)^alpha class weights (set >0 to enable)
+  smooth_nr: 0.0
+  smooth_dr: 1.0e-5
+  # image2image (rejected under image2label):
+  # l1:      { weight: 1.0 }
+  # l2:      { weight: 1.0 }
+  # feature: { image_weight: 0.25, patch_weight: 0.25, weights: path/to/emdino.pt }
+  #   `weights` is REQUIRED when the feature term is active.
+
+aug:                         # per-process: train configurable / val deterministic / infer follows val
+  train:
+    enabled: true
+    transforms:
+      flip:   { prob: 0.5, axes: [0, 1, 2] }
+      rotate: { prob: 0.5, range_x: [-3.1416, 3.1416] }
+      gaussian_noise: { prob: 0.2, mean: 0.0, std: 0.1 }
+  val:
+    enabled: false
+
+checkpoint:
+  save_format: split         # split (backbone + head) | merged
+  save_every: 50             # periodic snapshot cadence (epochs)
+  val_every: 1               # in-loop validation cadence (epochs)
+  save_logits: false         # infer: also write raw logits/<rel>.npy (opt-in)

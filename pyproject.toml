@@ -1,0 +1,40 @@
+# omniem-train — minimal install config (git-clone + local install).
+#
+# Training pipeline that consumes the frozen `omniem` inference package via its
+# public API. Install from a clone with:  pip install -e .
+# (omniem itself must already be importable in the same env.)
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "omniem-train"
+dynamic = ["version"]
+description = "Training pipeline for OmniEM models — a public-API consumer of the frozen omniem package."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Liuyuan He"}]
+
+dependencies = [
+    "omniem>=0.1.0,<1.0",
+    "torch>=2.3",
+    "monai>=1.2,<2",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "tifffile>=2023.1.0",
+    "pillow>=9.0",
+]
+
+[project.scripts]
+omniem-train = "omniem_train.cli:main"
+
+# Path-based version: regex-extracts __version__ from the package (no import at build).
+[tool.hatch.version]
+path = "omniem_train/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["omniem_train"]

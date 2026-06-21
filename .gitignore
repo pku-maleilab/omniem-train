@@ -1,0 +1,20 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Build / packaging artifacts
+build/
+dist/
+*.whl
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Run outputs and large local assets (users generate these)
+outputs/
+weights/
+*.pt
