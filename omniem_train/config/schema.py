@@ -120,6 +120,15 @@ class DataCfg(_StrictModel):
     cache_num: int = Field(default=24, ge=0)
     workers: int = Field(default=0, ge=0)
 
+    # Opt-in: XY-resize each image to its target/label. Contract (runtime-checked per item,
+    # since sizes are per-file): target == img_size_xy (square) & img_size_z, image Z == img_size_z
+    # → tiles stay uniform (collation-safe). Z never resized. Default off = exact-match.
+    match_target_shape: bool = False
+    # Incompatible item: "stop" raises (with paths); "skip" drops + warns.
+    shape_mismatch: Literal["stop", "skip"] = "stop"
+    # Image-only interpolation: cubic→bicubic, linear→bilinear (result clamped to input range).
+    resize_interp: Literal["cubic", "linear"] = "cubic"
+
 
 class OptimCfg(_StrictModel):
     """Optimizer + schedule."""

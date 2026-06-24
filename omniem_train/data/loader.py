@@ -30,10 +30,11 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from monai.data import CacheDataset, DataLoader
 from monai.transforms import Compose, Transform
 
-from .reader import read_image
+from .reader import read_image, shape_from_disk
 
 if TYPE_CHECKING:
     from ..config import LoadedConfig, RunConfig
@@ -150,6 +151,120 @@ def normalize_restoration_target(arr: np.ndarray) -> np.ndarray:
     return a.clip(0.0, 1.0)
 
 
+# ---- match_target_shape: XY-resize + shape-contract validation ------------
+# Opt-in. Resize each image's (Y, X) to its target/label's; contract keeps tiles uniform
+# (label == img_size_xy² & img_size_z, image Z == img_size_z). Z never resized.
+
+_INTERP = {"cubic": "bicubic", "linear": "bilinear"}
+
+
+def _zsize(t: torch.Tensor) -> int:
+    """Z extent of a ``[..., Z]`` tensor (canonical layout puts Z last)."""
+    return int(t.shape[-1])
+
+
+def resize_image_xy_to(
+    image: torch.Tensor, target_yx: tuple[int, int], *, mode: str
+) -> torch.Tensor:
+    """XY-resize a ``[C, Y, X, Z]`` float image to ``target_yx`` (per-Z-plane); Z untouched.
+
+    Preserves device + float dtype; clamps to the input's ``[min, max]`` (bicubic can overshoot).
+    """
+    if image.dim() != 4:
+        raise ValueError(
+            f"resize_image_xy_to expects a [C, Y, X, Z] tensor, got {tuple(image.shape)}"
+        )
+    if not isinstance(target_yx, (tuple, list)) or len(target_yx) != 2:
+        raise ValueError(f"resize_image_xy_to target_yx must be a (Y, X) pair, got {target_yx!r}")
+    ty, tx = int(target_yx[0]), int(target_yx[1])
+    if ty <= 0 or tx <= 0:
+        raise ValueError(f"resize_image_xy_to target size must be positive, got {target_yx}")
+    interp = _INTERP.get(mode)
+    if interp is None:
+        raise ValueError(f"resize_image_xy_to mode must be 'cubic' or 'linear', got {mode!r}")
+    if not image.is_floating_point():
+        raise ValueError(
+            f"resize_image_xy_to expects a floating-point image, got dtype {image.dtype}"
+        )
+    _, y, x, _ = image.shape
+    if (y, x) == (ty, tx):
+        return image
+    # Half bicubic is unsupported on CPU → promote to float32; float32/64 keep native precision.
+    orig_dtype = image.dtype
+    work_dtype = orig_dtype if orig_dtype in (torch.float32, torch.float64) else torch.float32
+    work = image.to(work_dtype)
+    lo, hi = work.amin(), work.amax()
+    # [C, Y, X, Z] -> [Z, C, Y, X] so each Z-plane is one image in the batch axis; then restore.
+    planes = work.permute(3, 0, 1, 2)
+    resized = F.interpolate(planes, size=(ty, tx), mode=interp, align_corners=False)
+    out = resized.permute(1, 2, 3, 0).clamp(min=lo, max=hi)
+    return out if out.dtype == orig_dtype else out.to(orig_dtype)
+
+
+def _format_shape_error(image_path: object, label_path: object, reason: str) -> str:
+    """One source of the incompatible-item message (raise for stop, warn for skip)."""
+    return (
+        f"match_target_shape: incompatible item — {reason}. "
+        f"image={image_path} label={label_path}"
+    )
+
+
+def _shape_violation(
+    img_yxz: tuple[int, int, int],
+    lbl_yxz: tuple[int, int, int],
+    *,
+    img_size_xy: int,
+    img_size_z: int,
+) -> str | None:
+    """Return a reason string if the (image, label) pair violates the contract, else None.
+
+    Contract: label XY == ``img_size_xy`` (square); image Z == label Z == ``img_size_z``.
+    The image XY is free (it is resized to the label's XY == ``img_size_xy``).
+    """
+    ly, lx, lz = lbl_yxz
+    iz = img_yxz[2]
+    if (ly, lx) != (img_size_xy, img_size_xy):
+        return f"target XY ({ly}x{lx}) must equal img_size_xy ({img_size_xy}x{img_size_xy}, square)"
+    if iz != img_size_z or lz != img_size_z:
+        return f"Z must equal img_size_z ({img_size_z}): image Z={iz}, target Z={lz}"
+    return None
+
+
+def _validate_or_filter_shapes(
+    items: list[dict[str, Any]],
+    *,
+    policy: str,
+    axes_order: str,
+    img_size_xy: int,
+    img_size_z: int,
+) -> list[dict[str, Any]]:
+    """Metadata-only contract check over manifest items (uses ``shape_from_disk``, so it
+    agrees with ``read_image``). Label-less items pass through. ``stop`` raises on the first
+    violation (before caching); ``skip`` drops + warns each.
+    """
+    if policy not in ("stop", "skip"):
+        raise ValueError(f"shape_mismatch policy must be 'stop' or 'skip', got {policy!r}")
+    kept: list[dict[str, Any]] = []
+    for item in items:
+        label_path = item.get("label")
+        if label_path is None:
+            kept.append(item)
+            continue
+        img_shape = shape_from_disk(item["image"], axes_order)
+        lbl_shape = shape_from_disk(label_path, axes_order)
+        reason = _shape_violation(
+            img_shape, lbl_shape, img_size_xy=img_size_xy, img_size_z=img_size_z
+        )
+        if reason is None:
+            kept.append(item)
+            continue
+        msg = _format_shape_error(item["image"], label_path, reason)
+        if policy == "stop":
+            raise ValueError(msg)
+        _LOG.warning("%s", msg)
+    return kept
+
+
 # ---- the MONAI Transform that loads an item -------------------------------
 
 
@@ -174,11 +289,21 @@ class LoadImageAndTarget(Transform):
         task_type: str,
         out_channels: int,
         require_label: bool,
+        match_target_shape: bool = False,
+        shape_mismatch: str = "stop",
+        resize_interp: str = "cubic",
+        img_size_xy: int | None = None,
+        img_size_z: int = 1,
     ) -> None:
         self.axes_order = axes_order
         self.task_type = task_type
         self.out_channels = out_channels
         self.require_label = require_label
+        self.match_target_shape = match_target_shape
+        self.shape_mismatch = shape_mismatch
+        self.resize_interp = resize_interp
+        self.img_size_xy = img_size_xy
+        self.img_size_z = img_size_z
 
     def __call__(self, item: dict[str, Any]) -> dict[str, torch.Tensor]:
         image_path = item["image"]
@@ -206,6 +331,20 @@ class LoadImageAndTarget(Transform):
         else:  # pragma: no cover (parse-time guard)
             raise ValueError(f"unknown task_type {self.task_type!r}")
         out["target"] = tensor
+
+        # match_target_shape: resize the image to the target's XY (only reached when a
+        # target exists). The validation is a backstop — get_loaders pre-filters first.
+        if self.match_target_shape:
+            img_yxz = (out["image"].shape[1], out["image"].shape[2], _zsize(out["image"]))
+            lbl_yxz = (tensor.shape[1], tensor.shape[2], _zsize(tensor))
+            reason = _shape_violation(
+                img_yxz, lbl_yxz, img_size_xy=self.img_size_xy, img_size_z=self.img_size_z
+            )
+            if reason is not None:
+                raise ValueError(_format_shape_error(image_path, label_path, reason))
+            out["image"] = resize_image_xy_to(
+                out["image"], (self.img_size_xy, self.img_size_xy), mode=self.resize_interp
+            )
         return out
 
 
@@ -318,6 +457,11 @@ def get_loaders(
         task_type=task_type,
         out_channels=out_channels,
         require_label=require_label,
+        match_target_shape=run_cfg.data.match_target_shape,
+        shape_mismatch=run_cfg.data.shape_mismatch,
+        resize_interp=run_cfg.data.resize_interp,
+        img_size_xy=run_cfg.data.img_size_xy,
+        img_size_z=run_cfg.data.img_size_z,
     )
 
     # per-process aug (train configurable / val deterministic).
@@ -351,16 +495,36 @@ def get_loaders(
         _worker_init_fn_factory(int(base_worker_seed)) if base_worker_seed is not None else None
     )
 
-    loaders: dict[str, DataLoader] = {}
+    # Pass 1: resolve + (when match_target_shape) validate/filter ALL splits before building
+    # any CacheDataset, so a stop violation / all-skipped split fails before anything caches.
+    split_items: dict[str, list[dict[str, Any]]] = {}
     for split in splits:
         files = jsons_map.get(split, [])
         if not files:
             continue
-        # Apply resolution to manifest file paths (run.yaml-relative).
         resolved = [_resolve_run_path(f, cfg_dir) for f in files]
         items = get_items(resolved)
         if not items:
             continue
+        if run_cfg.data.match_target_shape:
+            n_before = len(items)
+            items = _validate_or_filter_shapes(
+                items,
+                policy=run_cfg.data.shape_mismatch,
+                axes_order=run_cfg.data.axes_order,
+                img_size_xy=run_cfg.data.img_size_xy,
+                img_size_z=run_cfg.data.img_size_z,
+            )
+            if n_before > 0 and not items:
+                raise ValueError(
+                    f"{split}: all {n_before} items skipped due to shape mismatch "
+                    f"(data.shape_mismatch='skip') — nothing left to load"
+                )
+        split_items[split] = items
+
+    # Pass 2: build the loaders (CacheDataset caching happens here, after preflight).
+    loaders: dict[str, DataLoader] = {}
+    for split, items in split_items.items():
         loaders[split] = _build_loader(
             items,
             transform=_split_transform(split),

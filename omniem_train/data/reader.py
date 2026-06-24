@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+from tifffile import TiffFile
 from tifffile import imread as tifread
 
 # Spatial axes the reader canonicalises to: rows (Y), cols (X), depth (Z).
@@ -34,6 +35,74 @@ def _read_array(path: str | Path) -> np.ndarray:
         with Image.open(path) as im:
             return np.asarray(im)
     raise ValueError(f"unsupported image extension: {path.suffix!r} ({path})")
+
+
+# ---- canonical-shape rule (single source of truth) -------------------------
+# ``shape_after_read`` is the ONE raw-shape → canonical (Y, X, Z) map; both ``read_image``
+# (decode) and ``shape_from_disk`` (metadata) use it, so they can never disagree.
+
+
+def _squeeze_extra(raw_shape: tuple[int, ...]) -> tuple[int, ...]:
+    """Mirror ``ndarray.squeeze()``, but only for ``ndim > 3`` (matches ``read_image``: a
+    genuine 3D volume with a singleton Z keeps its 3 dims so ``axes_order`` still applies).
+    """
+    shape = tuple(int(d) for d in raw_shape)
+    if len(shape) > 3:
+        shape = tuple(d for d in shape if d != 1)
+    return shape
+
+
+def _canonical_perm(axes_order: str) -> tuple[int, int, int]:
+    """Permutation sending a 3D on-disk ``axes_order`` → canonical ``(Y, X, Z)``."""
+    axes = axes_order.lower()
+    if sorted(axes) != ["x", "y", "z"]:
+        raise ValueError(
+            f"axes_order must be a permutation of 'xyz' for a 3D image (got {axes_order!r})"
+        )
+    return tuple(axes.index(a) for a in _CANON)
+
+
+def shape_after_read(raw_shape: tuple[int, ...], axes_order: str = "zxy") -> tuple[int, int, int]:
+    """Canonical ``(Y, X, Z)`` shape a raw on-disk shape yields after ``read_image``.
+
+    2D ⇒ ``(Y, X, 1)``; 3D ⇒ apply the ``axes_order`` permutation; ``ndim > 3`` is
+    squeezed first (mirrors ``read_image``). Raises for any other rank.
+    """
+    shape = _squeeze_extra(raw_shape)
+    if len(shape) == 2:
+        return (shape[0], shape[1], 1)
+    if len(shape) == 3:
+        perm = _canonical_perm(axes_order)
+        return (shape[perm[0]], shape[perm[1]], shape[perm[2]])
+    raise ValueError(f"expected a 2D or 3D image, got shape {tuple(raw_shape)}")
+
+
+def _raw_shape_from_disk(path: str | Path) -> tuple[int, ...]:
+    """On-disk array shape without decoding pixels, matching ``_read_array``'s output shape
+    (PNG/JPEG mirror ``np.asarray(PIL)``: gray ⇒ ``(H, W)``, multi-band ⇒ ``(H, W, bands)``).
+    """
+    path = Path(path)
+    ext = path.suffix.lower().lstrip(".")
+    if ext in ("tif", "tiff"):
+        with TiffFile(path) as tf:
+            return tuple(int(d) for d in tf.series[0].shape)
+    if ext in ("png", "jpg", "jpeg"):
+        from PIL import Image
+
+        with Image.open(path) as im:
+            w, h = im.size  # PIL size is (width, height)
+            bands = len(im.getbands())
+        return (h, w) if bands == 1 else (h, w, bands)
+    raise ValueError(f"unsupported image extension: {path.suffix!r} ({path})")
+
+
+def shape_from_disk(path: str | Path, axes_order: str = "zxy") -> tuple[int, int, int]:
+    """Canonical ``(Y, X, Z)`` shape of ``path`` without decoding pixels.
+
+    Equivalent to ``read_image(path, axes_order).shape`` but metadata-only — used by the
+    shape-validation/skip pre-filter so it agrees with ``read_image`` by construction.
+    """
+    return shape_after_read(_raw_shape_from_disk(path), axes_order)
 
 
 def read_image(path: str | Path, axes_order: str = "zxy") -> np.ndarray:
@@ -63,14 +132,9 @@ def read_image(path: str | Path, axes_order: str = "zxy") -> np.ndarray:
         # Single plane → (Y, X, 1).
         arr = arr[:, :, np.newaxis]
     elif arr.ndim == 3:
-        axes = axes_order.lower()
-        if sorted(axes) != ["x", "y", "z"]:
-            raise ValueError(
-                f"axes_order must be a permutation of 'xyz' for a 3D image (got {axes_order!r})"
-            )
-        # Permutation that sends the on-disk order → canonical (Y, X, Z).
-        perm = tuple(axes.index(a) for a in _CANON)
-        arr = np.transpose(arr, perm)
+        # Permutation that sends the on-disk order → canonical (Y, X, Z). Shared with
+        # ``shape_after_read`` (one rule) so a metadata-only shape check cannot diverge.
+        arr = np.transpose(arr, _canonical_perm(axes_order))
     else:
         raise ValueError(f"expected a 2D or 3D image, got shape {arr.shape}")
 

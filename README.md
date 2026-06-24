@@ -122,6 +122,9 @@ data:
   axes_order: zxy
   img_size_xy: 112                   # square, a multiple of the model stride (112)
   img_size_z: 1
+  match_target_shape: false          # opt-in: XY-resize each image to its target/label
+  shape_mismatch: stop               # incompatible item: stop (error) | skip (drop + warn)
+  resize_interp: cubic               # image resize: cubic (bicubic) | linear (bilinear)
 
 optim:
   optimizer: adamw

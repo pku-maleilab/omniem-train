@@ -24,6 +24,7 @@ Public entry: :func:`train`, :func:`validate`, :func:`infer`, :func:`resume_run`
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -51,7 +52,12 @@ from .config import (
     load_config_bundle,
 )
 from .data import get_loaders
-from .data.loader import _resolve_run_path, get_items
+from .data.loader import (
+    _resolve_run_path,
+    _validate_or_filter_shapes,
+    get_items,
+    resize_image_xy_to,
+)
 from .logging import RunLogger
 from .loss import build_loss
 from .metrics import build_metrics
@@ -61,6 +67,8 @@ from .seed import seed_everything
 
 if TYPE_CHECKING:
     pass
+
+_LOG = logging.getLogger("omniem_train.trainer")
 
 
 # ---- helpers --------------------------------------------------------------
@@ -195,7 +203,26 @@ def _gather_train_items_for_loss(bundle: LoadedConfig) -> list[dict] | None:
             "compute class weights. Either set alpha=0 or include the train "
             "manifest used to derive the weights."
         )
-    return get_items(resolved)
+    items = get_items(resolved)
+    # The histogram must see the SAME items as the train loader (same shape filter).
+    if cfg.data.match_target_shape:
+        n_before = len(items)
+        items = _validate_or_filter_shapes(
+            items,
+            policy=cfg.data.shape_mismatch,
+            axes_order=cfg.data.axes_order,
+            img_size_xy=cfg.data.img_size_xy,
+            img_size_z=cfg.data.img_size_z,
+        )
+        # All-skipped guard (validate doesn't build the train loader, so guard here too) —
+        # a weighted run must not silently fall back to unweighted loss.
+        if n_before > 0 and not items:
+            raise ValueError(
+                "loss.label_weights_alpha > 0: all train items were skipped due to shape "
+                "mismatch (data.shape_mismatch='skip') — cannot compute class weights. "
+                "Fix the train manifest shapes or set label_weights_alpha=0."
+            )
+    return items
 
 
 def _save_run_manifest(
@@ -801,17 +828,42 @@ def infer(
         logits_root.mkdir(parents=True, exist_ok=True)
     metrics_root.mkdir(parents=True, exist_ok=True)
 
-    counts = {"pred": 0, "metrics": 0}
+    counts = {"pred": 0, "metrics": 0, "skipped_shape": 0}
+    match_shape = cfg.data.match_target_shape
     model.eval()
     with torch.no_grad():
         for manifest_str in cfg.data.infer_jsons:
             manifest_path = Path(_resolve_run_path(manifest_str, bundle.source_dir))
             items = get_items([str(manifest_path)])
+            # Pre-filter shape-incompatible items (infer bypasses get_loaders); count drops.
+            if match_shape:
+                n_before = len(items)
+                items = _validate_or_filter_shapes(
+                    items,
+                    policy=cfg.data.shape_mismatch,
+                    axes_order=cfg.data.axes_order,
+                    img_size_xy=cfg.data.img_size_xy,
+                    img_size_z=cfg.data.img_size_z,
+                )
+                counts["skipped_shape"] += n_before - len(items)
             stem = manifest_path.stem
             for item in items:
                 # Run one item.
                 image_arr = _read_for_infer(item["image"], axes_order=cfg.data.axes_order)
                 image_t = torch.from_numpy(image_arr).unsqueeze(0).unsqueeze(0).to(device)
+                # Resize to img_size_xy when a label is present (pre-filter ensured it fits);
+                # label-less items stay native. No-op when XY already matches.
+                if match_shape and "label" in item:
+                    isz = int(cfg.data.img_size_xy)
+                    src_y, src_x = int(image_t.shape[2]), int(image_t.shape[3])
+                    image_t = resize_image_xy_to(
+                        image_t[0], (isz, isz), mode=cfg.data.resize_interp
+                    ).unsqueeze(0)
+                    if (src_y, src_x) != (isz, isz):
+                        _LOG.info(
+                            "infer: resized input %s %dx%d -> %dx%d to match label",
+                            item["image"], src_y, src_x, isz, isz,
+                        )
                 prepared = model.apply_input(image_t, axes="bcyxz")
                 logits = model.predict(prepared)
                 pred = model.apply_output(logits, axes="bcyxz", dtype="uint8")

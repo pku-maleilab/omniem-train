@@ -13,8 +13,11 @@ config and the inference API, see the
 - [Commands](#commands)
 - [Weight forms](#weight-forms)
 - [Data manifests](#data-manifests)
-- [Image format](#image-format)
-- [Label format](#label-format)
+- [Data formats](#data-formats)
+  - [Image format](#image-format)
+  - [Label format](#label-format)
+  - [Auto-matching input ↔ target shape](#auto-matching-input--target-shape)
+  - [Examples](#examples)
 - [Loss options per task](#loss-options-per-task)
 - [Metrics](#metrics)
 - [Augmentation](#augmentation)
@@ -73,6 +76,9 @@ data:
   img_size_z: 1
   cache_num: 24              # MONAI CacheDataset cache size
   workers: 0                 # dataloader workers (0 = main process)
+  match_target_shape: false  # opt-in: XY-resize each image to its target/label
+  shape_mismatch: stop       # on a shape-incompatible item: stop (error) | skip (drop + warn)
+  resize_interp: cubic       # image resize interpolation: cubic (bicubic) | linear (bilinear)
 
 optim:
   optimizer: adamw           # adam | adamw | sgd
@@ -213,7 +219,12 @@ runs/
     ...
 ```
 
-## Image format
+## Data formats
+
+How the loader reads the `image` / `label` files a manifest points at, and how it can
+auto-match their shapes.
+
+### Image format
 
 - **Extensions:** `.tif` / `.tiff` or `.png` / `.jpg` / `.jpeg`.
 - **Channels:** single-channel grayscale only. The grayscale to 3-channel synthesis
@@ -227,11 +238,12 @@ runs/
   canonical `(Y, X, Z)`. A 2D image becomes `(Y, X, 1)`; a 3D volume with
   `img_size_z == 1` keeps `Z = 1` (no silent squeeze).
 - **Spatial size:** after the reader, the tile must match
-  `img_size_xy × img_size_xy × img_size_z`. The loader does not rescale. Preprocess
-  tiles to size, or enable spatial transforms in the `aug` block. `img_size_xy`
-  must be a multiple of the model stride (`omniemv1` uses 112).
+  `img_size_xy × img_size_xy × img_size_z`. By default the loader does **not** rescale —
+  preprocess tiles to size, or enable `data.match_target_shape` (below) to have the loader
+  XY-resize each image to its target. `img_size_xy` must be a multiple of the model stride
+  (`omniemv1` uses 112).
 
-## Label format
+### Label format
 
 | task | label on disk | what the loader does | constraint |
 |------|---------------|----------------------|------------|
@@ -239,7 +251,40 @@ runs/
 | `image2image` | image-like target (uint8 / uint16 / float) | Cast to float32. Integer dtypes are divided by `255.0`, then the result is clipped to `[0, 1]`; float dtypes are clipped only. | A target outside `[0, 1]` after conversion is clipped. |
 
 In both tasks the label must share the same spatial shape as the image (after the
-reader's axis reorder).
+reader's axis reorder) — **unless** `data.match_target_shape` is on, in which case the
+image's XY may differ and the loader resizes the image to the label's XY (the label is
+never resized; Z must still match). See *Auto-matching input ↔ target shape* below.
+
+### Auto-matching input ↔ target shape
+
+omniem models are **shape-preserving** (output XY == input XY). For tasks where the input
+and target differ in XY (e.g. **super-resolution**: a low-res input, a high-res target),
+you have two options:
+
+1. **Pre-match the shapes yourself** (default, `match_target_shape: false`). Build manifests
+   whose `image` and `label` already share spatial shape.
+2. **Let omniem-train resize** (`match_target_shape: true`). The loader XY-resizes each
+   **image** to its paired target/label, so the model sees the input at the target
+   resolution and produces output there. The label is the untouched reference.
+
+**Shape contract** (enforced per item when the flag is on, errors name the file paths):
+- the target/label must be `img_size_xy × img_size_xy` in XY (square; already
+  stride-validated) and `img_size_z` in Z;
+- the image must be `img_size_z` in Z (its XY is free — it is resized to `img_size_xy`).
+
+This keeps every tile uniform, so batching works at any `batch_size`. **Z is never
+resized.** A per-item violation is governed by `shape_mismatch`: `stop` (default) raises a
+clear error; `skip` drops the item and warns (a split emptied entirely by `skip` is an
+error). `resize_interp` picks the image interpolation — `cubic` (bicubic, default) or
+`linear` (bilinear); it applies to the image only and the result is clamped back to the
+image's original value range.
+
+**The resize is gated on a target/label being present.** Train and val always carry one
+(already required), so every train/val image is resized. Infer is per-item: an item *with*
+a label is resized to the label's size; an item *without* a label is predicted at its
+native size (no-op) — so supply a label for any infer item you want resized. Under `skip`,
+shape-incompatible infer items are dropped and counted in the run summary's `skipped_shape`;
+label-less native-size items are ordinary predictions, counted under `pred`.
 
 ### Examples
 
