@@ -5,8 +5,8 @@ Design points:
 * **Build via public API only** (``OmniEM.from_config`` / ``prepare_train``); the
   optimizer is taken over ``requires_grad`` params (no internal name match).
 * **Device** — auto unless ``run.device`` overrides; **AMP cuda-only**.
-* **Pure-logits ``predict``** → loss is on logits; restoration loss applies its
-  own sigmoid internally.
+* **Pure-logits via ``run(..., return_logits=True)``** → loss is on logits;
+  restoration loss applies its own sigmoid internally.
 * **In-loop validation** every ``checkpoint.val_every`` epochs — loss + metrics
   (metric-domain postproc).
 * **Two checkpoint artifacts** — paired weights + ``trainer_e<NNN>`` state.
@@ -72,6 +72,23 @@ _LOG = logging.getLogger("omniem_train.trainer")
 
 
 # ---- helpers --------------------------------------------------------------
+
+
+def _to_channelless(image: torch.Tensor) -> torch.Tensor:
+    """Drop the singleton channel axis: ``[B, 1, Y, X, Z]`` -> ``[B, Y, X, Z]``.
+
+    omniem's API is channel-less (``axes`` is drawn from ``{b, z, y, x}``), while the
+    dataloader emits single-channel ``[B, 1, Y, X, Z]`` tensors, so the channel is
+    dropped before ``model.run(..., axes="byxz")``. The 5D single-channel layout is
+    asserted first: a bare ``squeeze(1)`` would silently no-op on a mis-shaped tensor
+    and mask the real error.
+    """
+    if image.ndim != 5 or image.shape[1] != 1:
+        raise ValueError(
+            f"expected a single-channel [B, 1, Y, X, Z] tensor, got shape "
+            f"{tuple(image.shape)}"
+        )
+    return image[:, 0]
 
 
 def _resolve_device(cfg: RunConfig) -> str:
@@ -280,19 +297,18 @@ def _run_train_epoch(
         optimizer.zero_grad(set_to_none=True)
         if use_amp:
             with torch.amp.autocast(device_type=device, dtype=torch.float16):
-                # Input-transform (norm + channel synthesis) then forward. Splitting
-                # apply_input out of predict is byte-identical per the omniem v0.1.0
-                # contract; it keeps a single normalization site across all passes.
-                prepared = model.apply_input(image, axes="bcyxz")
-                logits = model.predict(prepared)
+                # run() owns normalization + gray->3ch + conform and returns
+                # caller-layout logits. axes="byxz" keeps the [B, C_out, Y, X, Z]
+                # layout the loss/metrics expect; return_logits=True gives pure logits
+                # (no task activation), which is what the loss consumes.
+                logits = model.run(_to_channelless(image), axes="byxz", return_logits=True)
                 loss = loss_fn(logits, target)
             assert scaler is not None
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
         else:
-            prepared = model.apply_input(image, axes="bcyxz")
-            logits = model.predict(prepared)
+            logits = model.run(_to_channelless(image), axes="byxz", return_logits=True)
             loss = loss_fn(logits, target)
             loss.backward()
             optimizer.step()
@@ -322,8 +338,7 @@ def _run_validate(
                 break
             image = batch["image"].to(device, non_blocking=True)
             target = batch["target"].to(device, non_blocking=True)
-            prepared = model.apply_input(image, axes="bcyxz")
-            logits = model.predict(prepared)
+            logits = model.run(_to_channelless(image), axes="byxz", return_logits=True)
             loss = loss_fn(logits, target)
             agg.update(logits, target)
             total += float(loss.detach().item()) * image.shape[0]
@@ -864,9 +879,17 @@ def infer(
                             "infer: resized input %s %dx%d -> %dx%d to match label",
                             item["image"], src_y, src_x, isz, isz,
                         )
-                prepared = model.apply_input(image_t, axes="bcyxz")
-                logits = model.predict(prepared)
-                pred = model.apply_output(logits, axes="bcyxz", dtype="uint8")
+                # The uint8 prediction and the raw logits are separate run() outputs
+                # (run() exposes no logits->output transform). The uint8 pass always
+                # runs — it writes the .tif. The logits pass runs only when its output
+                # is consumed (the optional .npy dump or the gt metric), so a
+                # label-less, no-save-logits item needs a single forward.
+                cl_image = _to_channelless(image_t)
+                pred = model.run(cl_image, axes="byxz", dtype="uint8")
+                need_logits = cfg.checkpoint.save_logits or "label" in item
+                logits = (
+                    model.run(cl_image, axes="byxz", return_logits=True) if need_logits else None
+                )
 
                 rel = _output_relative_path(item, manifest_path).with_suffix(".tif")
                 _write_pred_tiff(pred_root / stem / rel, pred[0])

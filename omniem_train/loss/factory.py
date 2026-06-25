@@ -49,7 +49,7 @@ def build_loss(
         rest = cfg.typed_loss()
         assert isinstance(rest, LossRestoreCfg)
         # data_mean/data_std come from the opaque model block (model.mean / model.std),
-        # in [0,1] image space — the same convention apply_input uses. The feature loss
+        # in [0,1] image space — the same convention model.run's affine uses. The feature loss
         # normalizes the [0,1] restoration target with them directly (no rescaling).
         return build_restoration_loss(
             restore_cfg=rest,

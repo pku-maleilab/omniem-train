@@ -19,7 +19,7 @@ license-files = ["LICENSE"]
 authors = [{ name = "Liuyuan He"}]
 
 dependencies = [
-    "omniem>=0.1.0,<1.0",
+    "omniem>=0.1.1,<0.2",
     "torch>=2.3",
     "monai>=1.2,<2",
     "pydantic>=2.0",

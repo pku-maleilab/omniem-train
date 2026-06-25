@@ -1,9 +1,9 @@
 """Restoration loss (``image2image``) — L1 + L2 + FeatureLoss.
 
-All restoration terms apply ``sigmoid`` internally: ``predict`` returns pure
-logits and the loss owns the activation, so a single forward serves both train
-(sigmoid-in-loss) and infer (``apply_output`` sigmoids for the saver). Targets are
-pre-normalised ``[0, 1]`` floats by the data pipeline.
+All restoration terms apply ``sigmoid`` internally: ``run(..., return_logits=True)``
+returns pure logits and the loss owns the activation, so a single forward serves
+both train (sigmoid-in-loss) and infer (the task-output ``run(..., dtype=…)`` sigmoids
+for the saver). Targets are pre-normalised ``[0, 1]`` floats by the data pipeline.
 
 FeatureLoss is the emdino-perceptual term: it formats inputs into
 ``[B*Z, 3ch, H, W]``, mean/std-normalises, and computes the ``image`` + ``patch``
@@ -93,9 +93,9 @@ class FeatureLoss(nn.Module):
     def _to_grayscale_byx(self, x: torch.Tensor) -> torch.Tensor:
         """``[B, 1, Y, X, Z]`` → ``[B*Z, Y, X]`` (grayscale + drop channel axis).
 
-        Public ``EMEncoder.forward`` requires grayscale (``axes='byx'`` — no
-        ``c`` axis) and applies its own gray→3ch + normalization in
-        ``apply_input``, so the encoder owns that pre-processing pipeline.
+        Public ``EMEncoder.run`` requires grayscale (``axes='byx'`` — no ``c``
+        axis) and applies its own gray→3ch + normalization internally, so the
+        encoder owns that pre-processing pipeline.
         """
         if x.dim() == 5:
             b, c, y, x_, z = x.shape
@@ -112,15 +112,20 @@ class FeatureLoss(nn.Module):
         raise ValueError(f"FeatureLoss expects 3D/4D/5D tensors, got {tuple(x.shape)}")
 
     def _encode(self, x: torch.Tensor) -> dict:
-        """Run the public ``EMEncoder.forward`` with the dataset mean/std.
+        """Run the public ``EMEncoder.run`` with the dataset mean/std.
 
-        ``norm={'mean','std'}`` overrides the encoder's default (pretraining)
-        stats so the affine uses the restoration dataset stats (``data_mean`` /
-        ``data_std``, in ``[0,1]`` image space).
+        ``run`` owns the input-transform (gray->3ch + the affine), so it is fed the
+        raw channel-less ``[B*Z, Y, X]`` grayscale. ``norm={'mean','std'}`` overrides
+        the encoder's default (pretraining) stats so the affine uses the restoration
+        dataset stats (``data_mean`` / ``data_std``, in ``[0,1]`` image space).
+        ``squeeze="z"`` drops the synthesized singleton depth (``axes="byx"`` has no
+        ``z``) so ``cls`` is ``[N, D]`` and ``patch`` is ``[N, P, D]`` — the shapes
+        :meth:`forward` consumes.
         """
-        return self.encoder.forward(
+        return self.encoder.run(
             self._to_grayscale_byx(x),
             axes="byx",
+            squeeze="z",
             return_cls=True,
             return_patch=True,
             norm={"mean": self.data_mean, "std": self.data_std},

@@ -58,7 +58,7 @@ model:                       # OPAQUE block, passed verbatim to omniem.OmniEM.fr
   task_type: image2label     # image2label | image2image
   resize4emdino: false
   mean: 0.5333               # fixed training normalization, in [0, 1] image space
-  std: 0.2314                #   (applied by model.apply_input)
+  std: 0.2314                #   (applied inside model.run)
 
 train:
   weights:
@@ -228,17 +228,27 @@ auto-match their shapes.
 
 - **Extensions:** `.tif` / `.tiff` or `.png` / `.jpg` / `.jpeg`.
 - **Channels:** single-channel grayscale only. The grayscale to 3-channel synthesis
-  the encoder needs happens inside `model.apply_input`; the loader emits raw
+  the encoder needs happens inside `model.run`; the loader emits raw
   `[1, Y, X, Z]` float32 tensors.
 - **Dtype:** any numeric dtype the reader can load (uint8 / uint16 / float). It is
   cast to float32 unchanged. The loader does no normalization, since
-  `model.apply_input` applies the configured `model.mean` / `std`.
+  `model.run` applies the configured `model.mean` / `std`.
+
+  > **Match `model.mean` / `model.std` to your image scale.** The reader casts
+  > intensities to float **without rescaling**: a uint8 image reaches the model as
+  > `[0, 255]`, a `[0, 1]` image as `[0, 1]`. `model.mean` / `model.std` must be in
+  > the **same** scale as the loaded images, since `model.run` applies them directly.
+  > The example above uses `[0, 1]`-domain stats (`0.5333` / `0.2314`), which assume
+  > `[0, 1]`-scaled inputs; for raw uint8 inputs either pre-scale your images to
+  > `[0, 1]` first, or use `[0, 255]`-domain stats (e.g. `136` / `59`). Mismatched
+  > scales train and infer on a wrong normalization. (omniem warns when stats or
+  > inputs fall outside `[0, 1]`.)
 - **Shape:** 2D `(Y, X)` or 3D in any axis order. `data.axes_order` (default `zxy`)
   tells the reader which on-disk axis is which, and the reader permutes to
   canonical `(Y, X, Z)`. A 2D image becomes `(Y, X, 1)`; a 3D volume with
   `img_size_z == 1` keeps `Z = 1` (no silent squeeze).
 - **Spatial size:** after the reader, the tile must match
-  `img_size_xy × img_size_xy × img_size_z`. By default the loader does **not** rescale —
+  `img_size_xy × img_size_xy × img_size_z`. By default the loader does **not** rescale:
   preprocess tiles to size, or enable `data.match_target_shape` (below) to have the loader
   XY-resize each image to its target. `img_size_xy` must be a multiple of the model stride
   (`omniemv1` uses 112).
@@ -251,7 +261,7 @@ auto-match their shapes.
 | `image2image` | image-like target (uint8 / uint16 / float) | Cast to float32. Integer dtypes are divided by `255.0`, then the result is clipped to `[0, 1]`; float dtypes are clipped only. | A target outside `[0, 1]` after conversion is clipped. |
 
 In both tasks the label must share the same spatial shape as the image (after the
-reader's axis reorder) — **unless** `data.match_target_shape` is on, in which case the
+reader's axis reorder), **unless** `data.match_target_shape` is on, in which case the
 image's XY may differ and the loader resizes the image to the label's XY (the label is
 never resized; Z must still match). See *Auto-matching input ↔ target shape* below.
 
@@ -270,19 +280,19 @@ you have two options:
 **Shape contract** (enforced per item when the flag is on, errors name the file paths):
 - the target/label must be `img_size_xy × img_size_xy` in XY (square; already
   stride-validated) and `img_size_z` in Z;
-- the image must be `img_size_z` in Z (its XY is free — it is resized to `img_size_xy`).
+- the image must be `img_size_z` in Z (its XY is free; it is resized to `img_size_xy`).
 
 This keeps every tile uniform, so batching works at any `batch_size`. **Z is never
 resized.** A per-item violation is governed by `shape_mismatch`: `stop` (default) raises a
 clear error; `skip` drops the item and warns (a split emptied entirely by `skip` is an
-error). `resize_interp` picks the image interpolation — `cubic` (bicubic, default) or
+error). `resize_interp` picks the image interpolation: `cubic` (bicubic, default) or
 `linear` (bilinear); it applies to the image only and the result is clamped back to the
 image's original value range.
 
 **The resize is gated on a target/label being present.** Train and val always carry one
 (already required), so every train/val image is resized. Infer is per-item: an item *with*
 a label is resized to the label's size; an item *without* a label is predicted at its
-native size (no-op) — so supply a label for any infer item you want resized. Under `skip`,
+native size (no-op), so supply a label for any infer item you want resized. Under `skip`,
 shape-incompatible infer items are dropped and counted in the run summary's `skipped_shape`;
 label-less native-size items are ordinary predictions, counted under `pred`.
 
@@ -341,13 +351,15 @@ internally (the model itself returns raw logits). Weighted terms:
 - `feature: { image_weight, patch_weight, weights }`: an EM-DINO perceptual term
   comparing encoder features of the prediction and target. `weights` (the encoder
   backbone file) is required when this term is active. It normalizes the `[0, 1]`
-  target with the configured `model.mean` / `model.std` directly — the same
-  `[0, 1]`-space stats `model.apply_input` uses (no separate rescaling).
+  target with the configured `model.mean` / `model.std` directly, the same
+  `[0, 1]`-space stats `model.run`'s affine uses (no separate rescaling).
 
 ## Metrics
 
-Metrics are fixed per task (no `metrics:` field). They are computed on the
-post-processed prediction (`model.apply_output`) versus the reference:
+Metrics are fixed per task (no `metrics:` field). They are computed on a
+**metric-domain** postproc of the logits (`image2label` → argmax→one-hot;
+`image2image` → `sigmoid(logits)` in `[0, 1]`), **not** the uint task-output that
+`model.run(..., dtype=…)` saves, versus the reference:
 
 - `image2label`: dice, iou, precision, recall, f1.
 - `image2image`: psnr, ssim.
@@ -380,7 +392,7 @@ values in the image only.
   validate/
     metrics.json
   infer/
-    pred/<manifest-stem>/<rel>.tif     # uint output via model.apply_output
+    pred/<manifest-stem>/<rel>.tif     # uint output via model.run(..., dtype=…)
     logits/<manifest-stem>/<rel>.npy   # opt-in via checkpoint.save_logits
     metrics/<manifest-stem>/<rel>.json # written for items that carry a label
 ```
@@ -397,7 +409,7 @@ run's weights. The `state/` checkpoints are left untouched; `resume` never clear
 Because the run owns `output_dir/weights/`, your **configured input weights**
 (`train.weights.encoder` / `head` / `merged`) must live **outside** that directory. A
 fresh `train` errors if an input path resolves inside `output_dir/weights/` (it would
-otherwise be wiped, or — with a checkpoint-like name — mis-selected by the resolvers).
+otherwise be wiped, or (with a checkpoint-like name) mis-selected by the resolvers).
 
 ## Resume
 
@@ -492,7 +504,7 @@ Invocation is `omniem-train <command> [options]`. Every command returns exit cod
 |--------|----------|---------|
 | `--config <run.yaml>` | `check`, `train`, `validate`, `infer`, `run` | Required. Path to the `run.yaml`. |
 | `--set path=value` | `check`, `train`, `validate`, `infer`, `run`, `resume` | Repeatable dotted-path override; the value is parsed as a YAML scalar. On `resume`, only the whitelist (`optim.max_epochs`, `checkpoint.save_every`, `checkpoint.val_every`) is allowed. |
-| `--verbose` | `train`, `validate`, `infer`, `run`, `resume` | Echo package `[INFO]` logs to stdout. Without it, only the command's result lines print. (Training writes the full `[INFO]` to `logs/train.log` as well — that file is produced by `train` / `resume` / the train phase of `run`; standalone `validate` / `infer` do not write it.) Not available on `check` / `list` / `convert-legacy`. |
+| `--verbose` | `train`, `validate`, `infer`, `run`, `resume` | Echo package `[INFO]` logs to stdout. Without it, only the command's result lines print. (Training writes the full `[INFO]` to `logs/train.log` as well; that file is produced by `train` / `resume` / the train phase of `run`; standalone `validate` / `infer` do not write it.) Not available on `check` / `list` / `convert-legacy`. |
 
 ### Weight selection (`validate`, `infer`)
 

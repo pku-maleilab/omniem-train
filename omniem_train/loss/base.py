@@ -1,9 +1,10 @@
 """Loss base + combination shape.
 
 Every term in this package follows the :class:`Loss` contract: ``__call__(logits,
-target) -> Tensor`` where ``logits`` is the **pure** ``predict`` output (no
-activation). Restoration terms (L1/L2/Feature) apply ``sigmoid`` internally, since
-the activation lives in the loss rather than the model.
+target) -> Tensor`` where ``logits`` is the model's **pure** logits (the
+``run(..., return_logits=True)`` output — no activation). Restoration terms
+(L1/L2/Feature) apply ``sigmoid`` internally, since the activation lives in the loss
+rather than the model.
 
 :class:`CombinationLoss` is a weighted sum: ``sum(w_i * term_i(logits, target))``.
 Terms are added with :meth:`add_loss`; the trainer never reaches into the list (the

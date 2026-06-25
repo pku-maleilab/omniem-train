@@ -145,7 +145,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
     from .config import export_inference_config, load_config_bundle
     from .data import get_loaders
-    from .trainer import _build_model_with_resolved_weights
+    from .trainer import _build_model_with_resolved_weights, _to_channelless
 
     bundle = load_config_bundle(args.config, overrides=args.overrides)
     cfg = bundle.cfg
@@ -172,8 +172,9 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
     model.eval()
     with torch.no_grad():
-        prepared = model.apply_input(image, axes="bcyxz")
-        logits = model.predict(prepared)
+        # Channel-less forward (see trainer._to_channelless): drop the loader's
+        # singleton channel, then run() returns caller-layout logits.
+        logits = model.run(_to_channelless(image), axes="byxz", return_logits=True)
 
     out_dir = bundle.resolve_run_path(cfg.run.output_dir)
     model_yaml = export_inference_config(cfg, out_dir / "model.yaml")

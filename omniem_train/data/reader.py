@@ -3,7 +3,7 @@
 Load the file, squeeze, reorder the on-disk axes to the canonical
 ``(Y, X, Z)`` spatial order, and return float32. Normalization is **not**
 done here — the mean/std affine and the gray → 3-channel synthesis are the
-model's job (``apply_input``). Augmentation and spatial conform live in the
+model's job (inside ``model.run``). Augmentation and spatial conform live in the
 augmentation builder; this reader assumes on-disk tiles are already at the
 configured spatial size (or that the aug pipeline will resize them).
 """

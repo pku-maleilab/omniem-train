@@ -27,7 +27,7 @@ volume inference. See [Model Usage](#model-usage).
 
 ## Install
 
-`omniem-train` requires **Python >= 3.10** and the released **`omniem >= 0.1.0`**.
+`omniem-train` requires **Python >= 3.10** and **`omniem >= 0.1.1, < 0.2`**.
 It is installed from a local clone (it is not published on PyPI). The recommended
 order is a fresh conda env, then omniem, then this package:
 
@@ -91,8 +91,9 @@ and example model-config YAMLs from the
 
 Train a segmentation head, starting from the pretrained EM-DINO backbone.
 
-**1. Get the encoder backbone.** Download `backbone_emdino_v1.pt` from the omniem
-model links and put it in a local `weights/` folder.
+**1. Get the encoder backbone.** Download `backbone_emdino_v1.pt` from the
+[omniem weights folder](https://drive.google.com/drive/folders/1vpzVk6vDui8Aj34FdTMfJpXbt5wlMsx_?usp=drive_link)
+and put it in a local `weights/` folder.
 
 **2. Write a `run.yaml`.** Point it at your image/label manifests and the backbone:
 
@@ -204,7 +205,7 @@ interactive in-memory inference and large-scale on-disk volume inference
 here:
 
 1. **Gather the model files** from your run's `<output_dir>`: `model.yaml` and the
-   trained weights under `weights/`. Use the split pair — the backbone (`backbone.pt`
+   trained weights under `weights/`. Use the split pair: the backbone (`backbone.pt`
    for the default frozen encoder, or `backbone_best.pt` if you fine-tuned it) and
    `head_best.pt` (or a merged `.pt`).
 

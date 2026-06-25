@@ -1,7 +1,7 @@
 """omniem-train data spine.
 
 Emits raw single-channel float ``[B, 1, Y, X, Z]`` batches; normalization +
-channel synthesis are the model's job (``apply_input``). Importing this
+channel synthesis are the model's job (inside ``model.run``). Importing this
 subpackage pulls in torch + MONAI, so it is a submodule import (not
 re-exported from ``omniem_train``).
 """

@@ -16,7 +16,7 @@
   in; the bare ``get_loaders`` default is None → MONAI's default seed).
 
 The dataloader emits **raw single-channel float** images (no normalization,
-no gray→3ch — those live inside ``model.apply_input``).
+no gray→3ch — those live inside ``model.run``).
 """
 
 from __future__ import annotations
@@ -272,7 +272,7 @@ class LoadImageAndTarget(Transform):
     """Load one manifest item → ``{"image": tensor, ["target": tensor]}``.
 
     The single channel is the on-disk grayscale; the gray→3ch synthesis the encoder
-    needs happens later inside ``model.apply_input`` (the package owns it), not here.
+    needs happens later inside ``model.run`` (the package owns it), not here.
 
     Args:
         axes_order: on-disk axis convention (e.g. ``"zxy"``).

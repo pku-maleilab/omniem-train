@@ -6,7 +6,8 @@ Public surface (called from validate/infer):
     reports a mean dict on :meth:`MetricAggregator.aggregate`.
   * :class:`MetricAggregator` — the contract.
 
-Metric **domain** is the metric-domain postproc, NOT ``apply_output``'s uint:
+Metric **domain** is the metric-domain postproc, NOT the task-output uint
+(``run(..., dtype=…)``):
   * ``image2label`` → ``argmax`` over channel axis → one-hot vs target one-hot.
   * ``image2image`` → ``sigmoid(logits)`` in ``[0,1]`` vs the ``[0,1]`` target
     (pre-quantization, not the uint file).

@@ -2,8 +2,8 @@
 
 A **public-API consumer** of the frozen ``omniem`` inference package: it builds /
 trains models through ``omniem``'s public surface only (``OmniEM.from_config`` /
-``prepare_train`` / ``predict`` / ``apply_output`` / ``save_weights`` + the arch
-catalog) and never reaches into omniem internals.
+``prepare_train`` / ``run`` / ``predict`` / ``save_weights`` + the arch catalog) and
+never reaches into omniem internals.
 
 Import-lightness contract: the package top level exports **only**
 ``__version__``. The config schema, CLI, model glue, and data stub are submodule

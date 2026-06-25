@@ -10,9 +10,9 @@ Internals:
   * :mod:`omniem_train.loss.segmentation` — DiceCE / BoundaryLoss.
   * :mod:`omniem_train.loss.restoration` — L1 / L2 / FeatureLoss.
 
-contract: ``predict`` returns **pure logits**; loss is task-gated and
-computed on logits. ``image2image`` applies ``sigmoid`` **internally** (the model
-stays pure-logits — the locked delta).
+contract: the model returns **pure logits** (``run(..., return_logits=True)``); loss
+is task-gated and computed on logits. ``image2image`` applies ``sigmoid``
+**internally** (the model stays pure-logits — the locked delta).
 """
 
 from .base import CombinationLoss, Loss
